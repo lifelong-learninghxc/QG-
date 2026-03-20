@@ -1,0 +1,17 @@
+问题三：
+1. 一致值的理论推导
+Olfati-Saber R, Fax J A, Murray R M. Consensus and Cooperation in Networked Multi-Agent Systems[J]. Proceedings of the IEEE, 2007, 95(1): 215-233.
+ 
+- 文中证明了在无向连通图或有向强连通平衡图下，多智能体均值一致性算法的收敛值为初始状态的加权平均，且给出了权重与图拉普拉斯矩阵特征向量的关联关系。
+ 
+2. 收敛性影响因素分析
+Ren W, Beard R W. Consensus Seeking in Multi-Agent Systems Under Dynamically Changing Interaction Topologies[J]. IEEE Transactions on Automatic Control, 2005, 50(5): 655-661.
+ 
+- 该文献指出，若交互拓扑在有限时间内保持连通（有向图需满足强连通），算法仍能收敛；若拓扑长期断裂或存在孤立节点，则无法达成一致。
+ 
+
+ 问题四：
+1. 收敛性条件的差异
+Moreau L. Stability of Multi-Agent Systems with Time-Dependent Communication Links[J]. IEEE Transactions on Automatic Control, 2005, 50(2): 169-182.
+ 
+- 该文献分析了离散时间算法对权重矩阵谱半径的要求（需小于1），以及连续时间算法对拉普拉斯矩阵正定性的要求，同时指出两类算法在连通性假设上的共性。
