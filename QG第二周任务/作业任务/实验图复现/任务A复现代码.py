@@ -11,6 +11,28 @@ LEADER_COLOR = "deeppink"
 DESIRED_LONG_GAP = np.array([15.0, 30.0, 45.0])
 
 
+def _generate_spread_initial_positions(rng, n_followers, min_dist=8.0, max_trials=5000):
+    """随机生成且彼此有最小间距的初始位置。"""
+    for _ in range(max_trials):
+        cand = np.column_stack(
+            [
+                rng.uniform(0.0, 18.0, size=n_followers),
+                rng.uniform(40.0, 70.0, size=n_followers),
+            ]
+        )
+        ok = True
+        for i in range(n_followers):
+            for j in range(i + 1, n_followers):
+                if np.linalg.norm(cand[i] - cand[j]) < min_dist:
+                    ok = False
+                    break
+            if not ok:
+                break
+        if ok:
+            return cand
+    return cand
+
+
 def _first_settling_time(t, signal_abs, threshold, hold_time=1.0):
     """返回首次进入阈值且持续 hold_time 的时刻，未满足则返回 np.nan。"""
     if len(t) < 2:
@@ -28,7 +50,7 @@ def run_case(case_name, xlim, ylim, t_end, fault_case=False, seed=42):
     """离散时间二阶模型：2s后启动高增益编队控制，目标在10s内收敛。"""
     rng = np.random.default_rng(seed)
 
-    dt = 0.02
+    dt = 0.01
     t = np.arange(0.0, t_end + dt, dt)
     n_steps = len(t)
     n_followers = 3
@@ -37,13 +59,8 @@ def run_case(case_name, xlim, ylim, t_end, fault_case=False, seed=42):
     leader_pos0 = np.array([5.0, 50.0])
     leader_vel_const = np.array([7.0, 0.0])
 
-    # 初始阶段随机分布（X<20, Y in [40,70]）
-    follower_pos0 = np.column_stack(
-        [
-            rng.uniform(0.0, 18.0, size=n_followers),
-            rng.uniform(40.0, 70.0, size=n_followers),
-        ]
-    )
+    # 初始阶段随机分布且保持一定间隔（X<20, Y in [40,70]）
+    follower_pos0 = _generate_spread_initial_positions(rng, n_followers, min_dist=8.0)
     follower_vel0 = np.column_stack(
         [
             rng.uniform(4.0, 9.0, size=n_followers),
@@ -70,6 +87,8 @@ def run_case(case_name, xlim, ylim, t_end, fault_case=False, seed=42):
     case2_kd_boost = 1.0
 
     fault_triggered = False
+    # 失控车开环恒速：故障触发后保持该速度，不再受通信/控制影响。
+    fault_open_loop_vel = np.array([10.0, 5.0])
 
     for k in range(1, n_steps):
         # Leader恒速更新
@@ -81,6 +100,8 @@ def run_case(case_name, xlim, ylim, t_end, fault_case=False, seed=42):
             control_start = 2.0
             if fault_case and i != 0:
                 control_start = 1.0
+            if fault_case and i == 0:
+                control_start = 0.8
 
             # t < 2s: 初始阶段不施加编队反馈，只保留惯性
             if t[k] < control_start:
@@ -89,12 +110,15 @@ def run_case(case_name, xlim, ylim, t_end, fault_case=False, seed=42):
                 target_pos = leader_pos[k] + np.array([-DESIRED_LONG_GAP[i], 0.0])
                 target_vel = leader_vel_const
 
-                # Case II: Vehicle i (蓝色, i=0) 在 x>20m 后失控
-                if fault_case and i == 0 and (p[0] > 20.0 or fault_triggered):
+                # Case II: Vehicle i (蓝色, i=0) 在极短时间后失控。
+                # 触发后切换为开环恒速，不再依赖 Leader 或通信信息。
+                if fault_case and i == 0 and (t[k] > 1.2 or p[0] > 13.0 or fault_triggered):
                     fault_triggered = True
-                    # 切断反馈控制后，保持斜向上运动并持续偏离 y=50
-                    target_vel_fault = np.array([6.0, 12.0])
-                    acc = 2.0 * (target_vel_fault - v)
+                    v_new = fault_open_loop_vel.copy()
+                    p_new = p + v_new * dt
+                    follower_vel[k, i] = v_new
+                    follower_pos[k, i] = p_new
+                    continue
                 else:
                     if fault_case and i != 0:
                         kp_eff = kp_pos * case2_kp_boost
@@ -134,6 +158,56 @@ def _draw_initial_topology(ax, leader0, followers0):
         ax.plot([xa, xb], [ya, yb], linestyle="--", color="gray", alpha=0.45, linewidth=1.2)
 
 
+def _draw_vehicle_trajectory_with_arrows(ax, x, y, color, label, linestyle="--"):
+    """绘制轨迹，并用较大的箭头指示运动方向，便于区分车辆。"""
+    ax.plot(x, y, color=color, linewidth=2.3, linestyle=linestyle, label=label, zorder=2)
+
+    n = len(x)
+    arrow_count = 10
+    idx = np.linspace(1, n - 2, arrow_count, dtype=int)
+    dx = x[idx + 1] - x[idx - 1]
+    dy = y[idx + 1] - y[idx - 1]
+
+    ax.quiver(
+        x[idx],
+        y[idx],
+        dx,
+        dy,
+        angles="xy",
+        scale_units="xy",
+        scale=1.0,
+        color=color,
+        width=0.006,
+        headwidth=8.5,
+        headlength=10.5,
+        headaxislength=8.2,
+        alpha=0.95,
+        zorder=4,
+    )
+
+
+def _draw_follower_spacing_links(ax, fp, t, fault_case):
+    """按时间抽样连接跟随车，直观显示车间间隔。"""
+    if fault_case:
+        link_pairs = [(1, 2)]
+    else:
+        link_pairs = [(0, 1), (1, 2)]
+
+    n = len(t)
+    sample_idx = np.linspace(0, n - 1, 14, dtype=int)
+    for k in sample_idx:
+        for i, j in link_pairs:
+            ax.plot(
+                [fp[k, i, 0], fp[k, j, 0]],
+                [fp[k, i, 1], fp[k, j, 1]],
+                color="#6f6f6f",
+                linestyle="-",
+                linewidth=1.2,
+                alpha=0.35,
+                zorder=1,
+            )
+
+
 def plot_case(sim_data, fig_id_start, file_prefix):
     t = sim_data["t"]
     lp = sim_data["leader_pos"]
@@ -144,15 +218,53 @@ def plot_case(sim_data, fig_id_start, file_prefix):
     # Fig. Position Trajectories
     fig, ax = plt.subplots(figsize=(8.0, 6.0))
     _draw_initial_topology(ax, lp[0], fp[0])
+    _draw_follower_spacing_links(ax, fp, t, sim_data["fault_case"])
 
-    ax.plot(lp[:, 0], lp[:, 1], color=LEADER_COLOR, linewidth=2.6, label="Leader")
-    ax.scatter(lp[0, 0], lp[0, 1], color=LEADER_COLOR, s=55, marker="o")
-    ax.scatter(lp[-1, 0], lp[-1, 1], color=LEADER_COLOR, s=70, marker="X")
+    _draw_vehicle_trajectory_with_arrows(
+        ax,
+        lp[:, 0],
+        lp[:, 1],
+        color=LEADER_COLOR,
+        label="Leader",
+        linestyle="-",
+    )
+    ax.scatter(lp[0, 0], lp[0, 1], color=LEADER_COLOR, s=120, marker="o", edgecolor="white", linewidths=0.8, zorder=5)
+    ax.scatter(lp[-1, 0], lp[-1, 1], color=LEADER_COLOR, s=175, marker=">", edgecolor="white", linewidths=0.9, zorder=6)
 
     for i in range(3):
-        ax.plot(fp[:, i, 0], fp[:, i, 1], color=FOLLOWER_COLORS[i], linewidth=2.2, linestyle="--", label=FOLLOWER_LABELS[i])
-        ax.scatter(fp[0, i, 0], fp[0, i, 1], color=FOLLOWER_COLORS[i], s=45, marker="o")
-        ax.scatter(fp[-1, i, 0], fp[-1, i, 1], color=FOLLOWER_COLORS[i], s=65, marker="x")
+        _draw_vehicle_trajectory_with_arrows(
+            ax,
+            fp[:, i, 0],
+            fp[:, i, 1],
+            color=FOLLOWER_COLORS[i],
+            label=FOLLOWER_LABELS[i],
+            linestyle="--",
+        )
+        ax.scatter(fp[0, i, 0], fp[0, i, 1], color=FOLLOWER_COLORS[i], s=105, marker="o", edgecolor="white", linewidths=0.8, zorder=5)
+        ax.scatter(fp[-1, i, 0], fp[-1, i, 1], color=FOLLOWER_COLORS[i], s=165, marker=">", edgecolor="white", linewidths=0.9, zorder=6)
+
+    # 末时刻队列示意：Case I 展示完整队列，Case II 展示健康车辆队列
+    if sim_data["fault_case"]:
+        final_order = [2, 1]
+    else:
+        final_order = [2, 1, 0]
+
+    qx = [fp[-1, idx, 0] for idx in final_order] + [lp[-1, 0]]
+    qy = [fp[-1, idx, 1] for idx in final_order] + [lp[-1, 1]]
+    ax.plot(qx, qy, color="#2f2f2f", linewidth=2.2, linestyle=":", alpha=0.85, label="Final stable queue", zorder=3)
+    if sim_data["fault_case"]:
+        y_fault_queue = fp[-1, 0, 1]
+        ax.hlines(
+            y_fault_queue,
+            xmin=sim_data["xlim"][0],
+            xmax=sim_data["xlim"][1],
+            color=FOLLOWER_COLORS[0],
+            linestyle=":",
+            linewidth=1.4,
+            alpha=0.5,
+            label="Fault vehicle stable lane",
+            zorder=0,
+        )
 
     ax.axhline(50.0, color="gray", linewidth=1.0, linestyle=":", alpha=0.8)
     ax.set_xlim(sim_data["xlim"])
@@ -348,9 +460,9 @@ if __name__ == "__main__":
     # 场景二：Vehicle i 失控，i+1 和 i+2 保持鲁棒收敛
     case2 = run_case(
         case_name="Case II",
-        xlim=(0.0, 80.0),
-        ylim=(0.0, 80.0),
-        t_end=12.0,
+        xlim=(0.0, 110.0),
+        ylim=(0.0, 120.0),
+        t_end=10.0,
         fault_case=True,
         seed=7,
     )
